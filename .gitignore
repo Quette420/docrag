@@ -1,0 +1,10 @@
+# Build output
+/docrag
+*.exe
+
+# Generated index cache
+chunks_cache.json
+
+# IDE
+.idea/
+.vscode/
