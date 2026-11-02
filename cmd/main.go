@@ -6,13 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/Quette420/docrag/internal/api"
 	chunkService "github.com/Quette420/docrag/internal/chunk/service"
 	docService "github.com/Quette420/docrag/internal/document/service"
-	"github.com/Quette420/docrag/internal/document/service/source"
 	embeddingOllama "github.com/Quette420/docrag/internal/embedding/ollama"
 	generationOllama "github.com/Quette420/docrag/internal/generation/ollama"
 	"github.com/Quette420/docrag/internal/index/inmemory"
@@ -94,10 +92,15 @@ func main() {
 // loadOrBuildIndex fills the indexer from the cache file, or runs the full
 // load -> chunk -> embed pipeline and writes a fresh cache.
 func loadOrBuildIndex(ctx context.Context, cfg config, fs *store.FileStore, embedder *embeddingOllama.OllamaEmbedder, indexer *inmemory.Indexer) ([]*model.Chunk, error) {
+	docs, fingerprint, err := corpusSnapshot(ctx, cfg, embedder)
+	if err != nil {
+		return nil, err
+	}
 	if !cfg.reindex {
-		chunks, err := fs.LoadChunks(cfg.cacheFile)
+		snapshot, err := fs.LoadSnapshot(cfg.cacheFile)
 		switch {
-		case err == nil && len(chunks) > 0:
+		case err == nil && snapshot.Fingerprint == fingerprint:
+			chunks := snapshot.Chunks
 			if err := indexer.Store(ctx, chunks); err != nil {
 				return nil, err
 			}
@@ -111,15 +114,14 @@ func loadOrBuildIndex(ctx context.Context, cfg config, fs *store.FileStore, embe
 	slog.Info("indexing documents", "docs", cfg.docsDir)
 	start := time.Now()
 
-	folderSource := source.NewFolderSource(cfg.docsDir, strings.Split(cfg.extensions, ","))
 	chunker := chunkService.NewRecursiveChunker(cfg.chunkSize, cfg.chunkOverlap)
-	exportService := docService.NewExportService(folderSource, chunker, embedder, indexer)
+	exportService := docService.NewExportService(docs, chunker, embedder, indexer)
 
 	chunks, err := exportService.Run(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := fs.SaveChunks(cfg.cacheFile, chunks); err != nil {
+	if err := fs.SaveSnapshot(cfg.cacheFile, fingerprint, chunks); err != nil {
 		slog.Warn("failed to save cache", "err", err)
 	}
 	slog.Info("indexing finished", "chunks", len(chunks), "elapsed", time.Since(start))
