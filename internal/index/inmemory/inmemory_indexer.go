@@ -65,6 +65,16 @@ func (i *Indexer) Search(ctx context.Context, queryEmbedding []float32, topK int
 	}
 
 	sort.Slice(scored, func(a, b int) bool {
+		if scored[a].score == scored[b].score {
+			left, right := scored[a].chunk, scored[b].chunk
+			if left.DocumentID != right.DocumentID {
+				return left.DocumentID < right.DocumentID
+			}
+			if left.Index != right.Index {
+				return left.Index < right.Index
+			}
+			return left.ID < right.ID
+		}
 		return scored[a].score > scored[b].score
 	})
 
