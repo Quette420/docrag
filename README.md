@@ -11,7 +11,8 @@ through a web UI or HTTP API. Everything runs locally on top of [Ollama](https:/
   heading path (`Guide > Install > Linux`) for better retrieval context.
 - **Concurrent embedding** with a worker pool and rate limiter.
 - **In-memory vector index** with cosine similarity search.
-- **Embedding cache**: the index is saved to a JSON file and reused on the next start.
+- **Embedding cache**: chunks and embeddings are reused only when the corpus and
+  indexing configuration still match the saved fingerprint.
 - **Streaming answers** over Server-Sent Events, plus a plain JSON mode.
 - **Pluggable components**: source, chunker, embedder, index and generator are small
   interfaces, so it's easy to swap in another vector DB or LLM provider.
@@ -55,9 +56,26 @@ through a web UI or HTTP API. Everything runs locally on top of [Ollama](https:/
 
 3. Open http://localhost:8080 and ask a question.
 
-The first start indexes all documents and writes `chunks_cache.json`; subsequent starts load
-the cache. Use `-reindex` after the documents change or when switching to another folder or
-embedding model.
+The first start indexes all documents and writes `chunks_cache.json`. On every start,
+DocRAG reads the selected corpus and checks content hashes, the canonical docs root,
+extensions, chunk size/overlap, Ollama endpoint and embedding model name/content digest.
+The digest is resolved from Ollama's [`GET /api/tags`](https://docs.ollama.com/api/tags),
+so replacing a model under the same tag also invalidates the cache.
+An unchanged snapshot skips document embedding; changed inputs trigger a full rebuild.
+`-reindex` forces rebuilding even when the fingerprint matches.
+
+The cache now stores a versioned JSON envelope containing the fingerprint and chunks.
+Legacy chunk-array caches are rebuilt once because they have no trustworthy configuration
+identity. Cache writes use a temporary file in the destination directory, then rename;
+failed scans, model-identity checks or embedding calls do not replace the previous cache.
+Startup fails on those errors rather than serving an unverifiable stale index.
+Ollama must be available for model identity verification even on a warm start.
+Keep the cache outside the selected input corpus.
+
+The snapshot describes the bytes read during startup, not a live filesystem transaction:
+there is no file watcher or automatic refresh while the server runs. Restart after editing
+documents. Rename atomicity depends on the filesystem/OS; power-loss durability and
+concurrent writers to the same cache file are not guaranteed.
 
 ## Configuration
 
@@ -140,13 +158,17 @@ HTTP integration tests use a temporary synthetic corpus and a deterministic fake
 Ollama HTTP endpoint with the real folder source, tokenizer, chunker, embedding
 and generation adapters, JSON cache/reload, in-memory index, retrieval and handler.
 They cover source provenance, JSON/SSE compatibility, empty retrieval, upstream
-failures and client cancellation. These checks do not require a model or GPU and
+failures and client cancellation. Startup tests additionally cover unchanged cache reuse,
+content edits with unchanged size/mtime, add/delete/root/model/digest changes, legacy
+cache migration and failures followed by recovery with the old cache preserved.
+These checks do not require a model or GPU and
 do not measure real-model answer quality. Go modules and the tokenizer's encoding
 data may require a first-run download.
 
 ## Roadmap
 
 - Source references (file + heading) are returned with JSON and streaming answers
+- Startup cache freshness is checked against the corpus and embedding configuration
 - Incremental reindexing based on content hashes
 - Persistent vector DB backend (e.g. Qdrant)
 - Hybrid (BM25 + vector) retrieval
