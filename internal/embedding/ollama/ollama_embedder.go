@@ -33,6 +33,41 @@ type ollamaResponse struct {
 	Embedding []float32 `json:"embedding"`
 }
 
+// ModelDigest resolves a mutable model tag to Ollama's current content digest.
+// A failed identity check must not authorize reuse of old cached embeddings.
+func (e *OllamaEmbedder) ModelDigest(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.baseURL+"/api/tags", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := e.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("model identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("model identity: Ollama returned %s", resp.Status)
+	}
+	var result struct {
+		Models []struct {
+			Name   string `json:"name"`
+			Model  string `json:"model"`
+			Digest string `json:"digest"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("model identity: %w", err)
+	}
+	for _, name := range []string{e.model, e.model + ":latest"} {
+		for _, m := range result.Models {
+			if (m.Name == name || m.Model == name) && m.Digest != "" {
+				return m.Digest, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("model identity: no digest for %q", e.model)
+}
+
 func NewOllamaEmbedder(baseURL, model string, rps int, workers int) *OllamaEmbedder {
 	if rps <= 0 {
 		rps = 10
