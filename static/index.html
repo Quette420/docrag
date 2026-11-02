@@ -25,6 +25,10 @@
     <button id="askBtn">Ask</button>
     <div class="status" id="status"></div>
     <div class="answer" id="answer"></div>
+    <section id="sources" hidden>
+        <h2>Retrieved sources</h2>
+        <ol id="sourceList"></ol>
+    </section>
 </div>
 
 <script>
@@ -32,6 +36,19 @@
     const askBtn = document.getElementById('askBtn');
     const answerDiv = document.getElementById('answer');
     const statusDiv = document.getElementById('status');
+    const sourcesDiv = document.getElementById('sources');
+    const sourceList = document.getElementById('sourceList');
+
+    function renderSources(sources) {
+        sourceList.replaceChildren();
+        for (const source of sources) {
+            const item = document.createElement('li');
+            const heading = (source.headings || []).join(' > ');
+            item.textContent = `[${source.id}] ${source.path || 'Unknown source path'}${heading ? ' — ' + heading : ''}`;
+            sourceList.appendChild(item);
+        }
+        sourcesDiv.hidden = sources.length === 0;
+    }
 
     function setStatus(text, isError = false) {
         statusDiv.textContent = text;
@@ -46,6 +63,7 @@
         }
 
         answerDiv.textContent = '';
+        renderSources([]);
         setStatus('Thinking...');
         askBtn.disabled = true;
 
@@ -67,6 +85,7 @@
             const decoder = new TextDecoder();
             let buffer = '';
             let fullAnswer = '';
+            let completed = false;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -90,15 +109,20 @@
                     // The server JSON-encodes every payload.
                     const payload = data ? JSON.parse(data) : '';
 
-                    if (eventType === 'token') {
+                    if (eventType === 'sources') {
+                        renderSources(payload);
+                    } else if (eventType === 'token') {
                         fullAnswer += payload;
                         answerDiv.textContent = fullAnswer;
                         setStatus(`Generating... (${fullAnswer.length} chars)`);
                     } else if (eventType === 'error') {
                         throw new Error(payload);
+                    } else if (eventType === 'done') {
+                        completed = true;
                     }
                 }
             }
+            if (!completed) throw new Error('Stream ended before completion. Please retry.');
             setStatus('Done');
         } catch (err) {
             setStatus(`Error: ${err.message}`, true);
