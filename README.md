@@ -86,13 +86,26 @@ curl -X POST localhost:8080/query -d '{"question": "How do I configure logging?"
 ```
 
 ```json
-{"answer": "...", "elapsed": 1234567890}
+{"answer": "... [1]", "elapsed": 1234567890, "sources": [{"id": 1, "path": "guides/setup.md", "headings": ["Guide", "Install"], "chunk_id": "..."}]}
 ```
 
-`elapsed` is in nanoseconds.
+`elapsed` is in nanoseconds. `sources` is an additive field containing the
+chunks actually retrieved for this answer, including file paths relative to
+the documentation root and their heading paths. IDs match the `[1]`, `[2]`, …
+labels supplied in the generation prompt and remain fixed during that answer.
+An empty path explicitly means that a legacy cached chunk has no known path;
+paths are never reconstructed from model output. A retrieved source list is
+not proof that every generated claim is correct or cited correctly.
 
-With `Accept: text/event-stream` the answer is streamed as Server-Sent Events. Every `data`
-payload is a JSON-encoded string:
+With `Accept: text/event-stream` the answer is streamed as Server-Sent Events.
+An additive `sources` event sends the JSON source array once, before any tokens:
+
+```text
+event: sources
+data: [{"id":1,"path":"guides/setup.md","headings":["Guide","Install"],"chunk_id":"..."}]
+```
+
+The existing `token`, `done` and `error` payloads remain JSON-encoded strings:
 
 ```
 event: token
@@ -105,15 +118,35 @@ event: done
 data: ""
 ```
 
-On failure an `error` event is sent instead of `done`.
+On failure an `error` event is sent instead of `done`. Malformed or truncated
+Ollama streams and upstream error objects are failures, not successful completion.
+Client cancellation cancels the upstream request; a disconnected client receives
+no completion event. Empty retrieval returns the existing no-results message
+with `sources: []` and never calls the generator.
 
 ### `GET /health`
 
 Returns `200 OK`.
 
+## Development checks
+
+```sh
+go test -race ./...
+go vet ./...
+go build -o docrag-server ./cmd
+```
+
+HTTP integration tests use a temporary synthetic corpus and a deterministic fake
+Ollama HTTP endpoint with the real folder source, tokenizer, chunker, embedding
+and generation adapters, JSON cache/reload, in-memory index, retrieval and handler.
+They cover source provenance, JSON/SSE compatibility, empty retrieval, upstream
+failures and client cancellation. These checks do not require a model or GPU and
+do not measure real-model answer quality. Go modules and the tokenizer's encoding
+data may require a first-run download.
+
 ## Roadmap
 
-- Return source references (file + heading) with each answer
+- Source references (file + heading) are returned with JSON and streaming answers
 - Incremental reindexing based on content hashes
 - Persistent vector DB backend (e.g. Qdrant)
 - Hybrid (BM25 + vector) retrieval
