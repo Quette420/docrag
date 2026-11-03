@@ -26,11 +26,13 @@ type generateRequest struct {
 
 type generateResponse struct {
 	Response string `json:"response"`
+	Error    string `json:"error"`
 }
 
 type streamResponse struct {
 	Response string `json:"response"`
 	Done     bool   `json:"done"`
+	Error    string `json:"error"`
 }
 
 func NewGenerator(baseURL, model string) *OllamaGenerator {
@@ -80,6 +82,9 @@ func (g *OllamaGenerator) Generate(ctx context.Context, prompt string) (string, 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
+	if result.Error != "" {
+		return "", fmt.Errorf("ollama generate: %s", result.Error)
+	}
 	return result.Response, nil
 }
 
@@ -124,14 +129,26 @@ func (g *OllamaGenerator) GenerateStream(ctx context.Context, prompt string, cal
 		}
 		var chunk streamResponse
 		if err := json.Unmarshal(line, &chunk); err != nil {
-			continue
+			return fmt.Errorf("decode ollama stream: %w", err)
+		}
+		if chunk.Error != "" {
+			return fmt.Errorf("ollama stream: %s", chunk.Error)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if chunk.Response != "" {
 			callback(chunk.Response)
 		}
 		if chunk.Done {
-			break
+			return ctx.Err()
 		}
 	}
-	return scanner.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("ollama stream ended before done: %w", io.ErrUnexpectedEOF)
 }

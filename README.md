@@ -11,7 +11,8 @@ through a web UI or HTTP API. Everything runs locally on top of [Ollama](https:/
   heading path (`Guide > Install > Linux`) for better retrieval context.
 - **Concurrent embedding** with a worker pool and rate limiter.
 - **In-memory vector index** with cosine similarity search.
-- **Embedding cache**: the index is saved to a JSON file and reused on the next start.
+- **Embedding cache**: chunks and embeddings are reused only when the corpus and
+  indexing configuration still match the saved fingerprint.
 - **Streaming answers** over Server-Sent Events, plus a plain JSON mode.
 - **Pluggable components**: source, chunker, embedder, index and generator are small
   interfaces, so it's easy to swap in another vector DB or LLM provider.
@@ -55,9 +56,26 @@ through a web UI or HTTP API. Everything runs locally on top of [Ollama](https:/
 
 3. Open http://localhost:8080 and ask a question.
 
-The first start indexes all documents and writes `chunks_cache.json`; subsequent starts load
-the cache. Use `-reindex` after the documents change or when switching to another folder or
-embedding model.
+The first start indexes all documents and writes `chunks_cache.json`. On every start,
+DocRAG reads the selected corpus and checks content hashes, the canonical docs root,
+extensions, chunk size/overlap, Ollama endpoint and embedding model name/content digest.
+The digest is resolved from Ollama's [`GET /api/tags`](https://docs.ollama.com/api/tags),
+so replacing a model under the same tag also invalidates the cache.
+An unchanged snapshot skips document embedding; changed inputs trigger a full rebuild.
+`-reindex` forces rebuilding even when the fingerprint matches.
+
+The cache now stores a versioned JSON envelope containing the fingerprint and chunks.
+Legacy chunk-array caches are rebuilt once because they have no trustworthy configuration
+identity. Cache writes use a temporary file in the destination directory, then rename;
+failed scans, model-identity checks or embedding calls do not replace the previous cache.
+Startup fails on those errors rather than serving an unverifiable stale index.
+Ollama must be available for model identity verification even on a warm start.
+Keep the cache outside the selected input corpus.
+
+The snapshot describes the bytes read during startup, not a live filesystem transaction:
+there is no file watcher or automatic refresh while the server runs. Restart after editing
+documents. Rename atomicity depends on the filesystem/OS; power-loss durability and
+concurrent writers to the same cache file are not guaranteed.
 
 ## Configuration
 
@@ -86,13 +104,26 @@ curl -X POST localhost:8080/query -d '{"question": "How do I configure logging?"
 ```
 
 ```json
-{"answer": "...", "elapsed": 1234567890}
+{"answer": "... [1]", "elapsed": 1234567890, "sources": [{"id": 1, "path": "guides/setup.md", "headings": ["Guide", "Install"], "chunk_id": "..."}]}
 ```
 
-`elapsed` is in nanoseconds.
+`elapsed` is in nanoseconds. `sources` is an additive field containing the
+chunks actually retrieved for this answer, including file paths relative to
+the documentation root and their heading paths. IDs match the `[1]`, `[2]`, …
+labels supplied in the generation prompt and remain fixed during that answer.
+An empty path explicitly means that a legacy cached chunk has no known path;
+paths are never reconstructed from model output. A retrieved source list is
+not proof that every generated claim is correct or cited correctly.
 
-With `Accept: text/event-stream` the answer is streamed as Server-Sent Events. Every `data`
-payload is a JSON-encoded string:
+With `Accept: text/event-stream` the answer is streamed as Server-Sent Events.
+An additive `sources` event sends the JSON source array once, before any tokens:
+
+```text
+event: sources
+data: [{"id":1,"path":"guides/setup.md","headings":["Guide","Install"],"chunk_id":"..."}]
+```
+
+The existing `token`, `done` and `error` payloads remain JSON-encoded strings:
 
 ```
 event: token
@@ -105,15 +136,39 @@ event: done
 data: ""
 ```
 
-On failure an `error` event is sent instead of `done`.
+On failure an `error` event is sent instead of `done`. Malformed or truncated
+Ollama streams and upstream error objects are failures, not successful completion.
+Client cancellation cancels the upstream request; a disconnected client receives
+no completion event. Empty retrieval returns the existing no-results message
+with `sources: []` and never calls the generator.
 
 ### `GET /health`
 
 Returns `200 OK`.
 
+## Development checks
+
+```sh
+go test -race ./...
+go vet ./...
+go build -o docrag-server ./cmd
+```
+
+HTTP integration tests use a temporary synthetic corpus and a deterministic fake
+Ollama HTTP endpoint with the real folder source, tokenizer, chunker, embedding
+and generation adapters, JSON cache/reload, in-memory index, retrieval and handler.
+They cover source provenance, JSON/SSE compatibility, empty retrieval, upstream
+failures and client cancellation. Startup tests additionally cover unchanged cache reuse,
+content edits with unchanged size/mtime, add/delete/root/model/digest changes, legacy
+cache migration and failures followed by recovery with the old cache preserved.
+These checks do not require a model or GPU and
+do not measure real-model answer quality. Go modules and the tokenizer's encoding
+data may require a first-run download.
+
 ## Roadmap
 
-- Return source references (file + heading) with each answer
+- Source references (file + heading) are returned with JSON and streaming answers
+- Startup cache freshness is checked against the corpus and embedding configuration
 - Incremental reindexing based on content hashes
 - Persistent vector DB backend (e.g. Qdrant)
 - Hybrid (BM25 + vector) retrieval
